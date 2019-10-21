@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"fyfe.io/merkle"
 	pb "fyfe.io/merkle"
@@ -14,7 +15,6 @@ import (
 )
 
 func main() {
-
 	var serverAddr string
 	flag.StringVar(&serverAddr, "addr", "127.0.0.1:9999", "Server address")
 
@@ -37,28 +37,30 @@ func main() {
 	}
 	defer file.Close()
 
+	var wg sync.WaitGroup
+	wg.Add(int(metadata.Parts))
 	for i := 0; i < int(metadata.Parts); i++ {
-		part, err := client.GetPart(context.Background(), &merkle.PartRequest{Idx: int32(i)})
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("Part: %v\n", part)
-		fmt.Printf("Hash: %s\n", pb.Hash(part.Data))
-		fmt.Printf("OK? %v\n", Prove(part.Proof, pb.Hash(part.Data)))
-
-		if !Prove(part.Proof, pb.Hash(part.Data)) {
-			log.Fatalf("Part %d failed merkle proof check\n", part.Idx)
-		}
-		offset := int64(int(part.Idx) * len(part.Data))
-		fmt.Printf("Writing %d bytes @ %d", len(part.Data), offset)
-		_, err = file.WriteAt(part.Data, offset)
-		if err != nil {
-			log.Fatal("Failed writing data to file")
-		}
+		func() {
+			part, err := client.GetPart(context.Background(), &merkle.PartRequest{Idx: int32(i)})
+			if err != nil {
+				log.Fatal(err)
+			}
+			if !prove(part.Proof, pb.Hash(part.Data)) {
+				log.Fatalf("Part %d failed merkle proof check\n", part.Idx)
+			}
+			offset := int64(int(part.Idx) * int(metadata.ChunkSize))
+			fmt.Printf("Writing %d bytes @ %d - %x", len(part.Data), offset, part.Data)
+			_, err = file.WriteAt(part.Data, offset)
+			if err != nil {
+				log.Fatal("Failed writing data to file")
+			}
+			wg.Done()
+		}()
 	}
+	wg.Wait()
 }
 
-func Prove(p *pb.Proof, ha string) bool {
+func prove(p *pb.Proof, ha string) bool {
 	rootHash := p.MerkleRoot
 	for i := 0; i < len(p.Nodes); i++ {
 		if p.Nodes[i].Side == pb.Proof_ProofNode_RIGHT {
@@ -66,7 +68,6 @@ func Prove(p *pb.Proof, ha string) bool {
 		} else {
 			ha = pb.Hash([]byte(p.Nodes[i].Hash + ha))
 		}
-		fmt.Printf("#%03d: %s\n", i, ha)
 	}
 
 	return ha == rootHash
